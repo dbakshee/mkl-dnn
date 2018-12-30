@@ -42,6 +42,7 @@ void check_softmax_fwd(prop_kind aprop_kind, memory &src, memory &dst, int axis)
 
     int MB = dst_pd.data.dims[0];
     int C = dst_pd.data.dims[1];
+    if (MB*C == 0) return;
 
     if (dst_pd.data.ndims == 2) {
         if (axis == 1) {
@@ -67,6 +68,7 @@ void check_softmax_fwd(prop_kind aprop_kind, memory &src, memory &dst, int axis)
     } else {
         int H = dst_pd.data.dims[2];
         int W = dst_pd.data.dims[3];
+        if (H*W == 0) return;
 
         auto off = [=](int n, int c, int h, int w)
         {
@@ -162,15 +164,8 @@ protected:
         auto mem_desc = memory::desc(p.dims, prec, p.memory_format);
         auto mem_prim_desc = memory::primitive_desc(mem_desc, eng);
 
-        // TODO: free
-        auto src_data = new data_t[mem_prim_desc.get_size()];
-        auto dst_data = new data_t[mem_prim_desc.get_size()];
-
-        auto src = memory(mem_prim_desc, src_data);
-        auto dst = memory(mem_prim_desc, dst_data);
-
-        fill_data<data_t>(mem_prim_desc.get_size(),
-                (data_t *)src.get_data_handle(), data_t(0), data_t(1));
+        auto src = memory(mem_prim_desc);
+        auto dst = memory(mem_prim_desc);
 
         auto softmax_desc = softmax_forward::desc(p.aprop_kind, mem_desc,
                     p.axis);
@@ -178,12 +173,17 @@ protected:
             = softmax_forward::primitive_desc(softmax_desc, eng);
         auto softmax = softmax_forward(softmax_prim_desc, src, dst);
 
-        std::vector<primitive> pipeline;
-        pipeline.push_back(softmax);
-        auto s = stream(stream::kind::lazy);
-        s.submit(pipeline).wait();
+        auto test_with_given_fill = [&](data_t mean, data_t var) {
+            fill_data<data_t>(mem_prim_desc.get_size() / sizeof(data_t),
+                    (data_t *)src.get_data_handle(), mean, var);
 
-        check_softmax_fwd<data_t>(p.aprop_kind, src, dst, p.axis);
+            stream(stream::kind::lazy).submit({softmax}).wait();
+            check_softmax_fwd<data_t>(p.aprop_kind, src, dst, p.axis);
+        };
+
+        test_with_given_fill(-200, 1);
+        test_with_given_fill(   0, 1);
+        test_with_given_fill( 200, 1);
     }
 };
 
@@ -194,8 +194,15 @@ TEST_P(softmax_forward_test_float, TestsSoftmax) { }
 INSTANTIATE_TEST_CASE_P(TestSoftmaxForward, softmax_forward_test_float,
         ::testing::Values(
             softmax_fwd_test_params_float{prop_kind::forward_scoring,
-            engine::kind::cpu, memory::format::nchw, {2, 0, 128, 256}, 0,
+            engine::kind::cpu, memory::format::nchw, {2, -2, 128, 256}, 0,
             true, mkldnn_invalid_arguments},
+            softmax_fwd_test_params_float{prop_kind::forward_scoring,
+            engine::kind::cpu, memory::format::nchw, {2, 2, 128, 256}, 5,
+            true, mkldnn_invalid_arguments},
+            softmax_fwd_test_params_float{prop_kind::forward_scoring,
+            engine::kind::cpu, memory::format::nchw, {2, 0, 5, 5}, 0},
+            softmax_fwd_test_params_float{prop_kind::forward_scoring,
+            engine::kind::cpu, memory::format::nchw, {2, 0, 5, 5}, 1},
             softmax_fwd_test_params_float{prop_kind::forward_scoring,
             engine::kind::cpu, memory::format::nchw, {2, 19, 128, 256}, 0},
             softmax_fwd_test_params_float{prop_kind::forward_scoring,
@@ -209,5 +216,7 @@ INSTANTIATE_TEST_CASE_P(TestSoftmaxForward, softmax_forward_test_float,
             softmax_fwd_test_params_float{prop_kind::forward_scoring,
             engine::kind::cpu, memory::format::nc, {2, 1000}, 0},
             softmax_fwd_test_params_float{prop_kind::forward_scoring,
-            engine::kind::cpu, memory::format::nc, {2, 1000}, 1}));
+            engine::kind::cpu, memory::format::nc, {2, 1000}, 1},
+            softmax_fwd_test_params_float{prop_kind::forward_scoring,
+            engine::kind::cpu, memory::format::nc, {1, 256}, 1}));
 }

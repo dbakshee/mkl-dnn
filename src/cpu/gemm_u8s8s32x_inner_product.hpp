@@ -20,13 +20,14 @@
 #include <assert.h>
 
 #include "c_types_map.hpp"
-#include "cpu_inner_product_pd.hpp"
-#include "cpu_engine.hpp"
+#include "memory_tracking.hpp"
 #include "type_helpers.hpp"
 #include "utils.hpp"
-#include "scratchpad.hpp"
 
-#include "gemm/os_blas.hpp"
+#include "gemm/gemm.hpp"
+#include "jit_generator.hpp"
+
+#include "cpu_inner_product_pd.hpp"
 
 namespace mkldnn {
 namespace impl {
@@ -40,7 +41,7 @@ struct gemm_u8s8s32x_inner_product_fwd_t: public cpu_primitive_t {
                 const inner_product_fwd_pd_t *hint_fwd_pd)
             : cpu_inner_product_fwd_pd_t(engine, adesc, attr, hint_fwd_pd) {}
 
-        DECLARE_COMMON_PD_T("gemm:blas", gemm_u8s8s32x_inner_product_fwd_t);
+        DECLARE_COMMON_PD_T(IGEMM_IMPL_STR, gemm_u8s8s32x_inner_product_fwd_t);
 
         virtual status_t init() override {
             using namespace utils;
@@ -49,62 +50,70 @@ struct gemm_u8s8s32x_inner_product_fwd_t: public cpu_primitive_t {
             assert(engine()->kind() == engine_kind::cpu);
 
             bool ok = true
-#if !USE_MKL_IGEMM
-                && false
-#endif
                 && this->set_default_params() == status::success
                 && one_of(desc()->prop_kind, prop_kind::forward_training,
                         prop_kind::forward_inference)
+                && !has_zero_dim_memory()
                 && this->desc()->src_desc.data_type == u8
                 && this->desc()->dst_desc.data_type == dst_type
                 && this->desc()->weights_desc.data_type == s8
-                && utils::implication(this->with_bias(), utils::one_of(
+                && IMPLICATION(this->with_bias(), utils::one_of(
                             this->desc()->bias_desc.data_type, f32, s32, s8,
                             u8))
                 && attr()->post_ops_.len_ <= 1
-                && utils::implication(attr()->post_ops_.len_,
+                && IMPLICATION(attr()->post_ops_.len_,
                         attr()->post_ops_.entry_[0].is_relu(true, false))
                 && dense_gemm_consitency_check(src_pd(), weights_pd(),
                         dst_pd());
-            return ok ? status::success : status::unimplemented;
+            if (!ok) return status::unimplemented;
+
+            dst_is_acc_ = one_of(dst_type, s32, f32);
+
+            init_scratchpad();
+
+            return status::success;
         }
+
+        bool dst_is_acc_;
 
     protected:
         virtual status_t set_default_params() override {
             using namespace memory_format;
 
-            if (this->src_pd_.desc()->format == any)
-            {
+            if (this->src_pd_.desc()->format == any) {
                 if (ndims() == 4) CHECK(this->src_pd_.set_format(nhwc));
                 else if (ndims() == 5) CHECK(this->src_pd_.set_format(ndhwc));
                 else CHECK(this->src_pd_.set_format(nc));
             }
             if (this->dst_pd_.desc()->format == any)
                 CHECK(this->dst_pd_.set_format(nc));
-            if (this->weights_pd_.desc()->format == any)
-            {
+            if (this->weights_pd_.desc()->format == any) {
                 if (ndims() == 4) CHECK(this->weights_pd_.set_format(hwio));
                 else if (ndims() == 5) CHECK(this->weights_pd_.set_format(dhwio));
                 else CHECK(this->weights_pd_.set_format(io));
             }
             if (this->bias_pd_.desc()->format == any)
                 CHECK(this->bias_pd_.set_format(x));
+
             return status::success;
+        }
+
+    private:
+        void init_scratchpad() {
+            if (!dst_is_acc_) {
+                auto scratchpad = scratchpad_registry().registrar();
+                scratchpad.book(
+                        memory_tracking::names::key_iprod_int_dat_in_acc_dt,
+                        sizeof(acc_data_t) * MB() * OC());
+            }
         }
     };
 
-    gemm_u8s8s32x_inner_product_fwd_t(const pd_t *pd, const input_vector &inputs,
+    gemm_u8s8s32x_inner_product_fwd_t(const pd_t *apd, const input_vector &inputs,
             const output_vector &outputs)
-        : cpu_primitive_t(&conf_, inputs, outputs), conf_(*pd), dst_is_acc_(false),
-        scratchpad_(nullptr)
-    {
-        dst_is_acc_ = utils::one_of(dst_type, data_type::s32, data_type::f32);
-        if (!dst_is_acc_) {
-            size_t size = conf_.MB() * conf_.OC() * sizeof(acc_data_t);
-            scratchpad_ = create_scratchpad(size);
-        }
-    }
-    ~gemm_u8s8s32x_inner_product_fwd_t() { delete scratchpad_; };
+        : cpu_primitive_t(apd, inputs, outputs, true)
+    { pp_kernel_ = new pp_kernel_t(apd, pd()->dst_is_acc_); }
+    ~gemm_u8s8s32x_inner_product_fwd_t() { delete pp_kernel_; }
 
     typedef typename prec_traits<dst_type>::type data_t;
 
@@ -113,16 +122,51 @@ struct gemm_u8s8s32x_inner_product_fwd_t: public cpu_primitive_t {
     typedef typename prec_traits<dst_type>::type dst_data_t;
     typedef typename prec_traits<data_type::s32>::type acc_data_t;
 
-    virtual void execute(event_t *e) {
+    virtual void execute(event_t *e) const {
         execute_forward();
         e->set_state(event_t::ready);
     }
 
 private:
-    void execute_forward();
-    pd_t conf_;
-    bool dst_is_acc_;
-    scratchpad_t *scratchpad_;
+    // XXX: this is throwaway code that will become unnecessary when we have a
+    // sufficiently advanced igemm jit generator that supports quantization,
+    // relu, and whatnot
+    class pp_kernel_t: jit_generator {
+    public:
+        DECLARE_CPU_JIT_AUX_FUNCTIONS(
+                gemm_u8s8s32x_inner_product_fwd_t::pp_kernel);
+        pp_kernel_t(const pd_t *pd, bool dst_is_acc);
+
+        void operator()(dst_data_t *dst, const acc_data_t *acc,
+                const char *bias, const float *scales, float nslope,
+                size_t start, size_t end);
+    private:
+        void generate();
+
+        struct ker_args {
+            dst_data_t *dst;
+            const acc_data_t *acc;
+            const char *bias;
+            const float *scales;
+            float nslope;
+            size_t len;
+            size_t oc_offset;
+        };
+        void (*ker_)(const ker_args *args);
+
+        size_t OC_;
+        data_type_t bias_data_type_;
+        size_t bias_data_type_size_;
+        size_t scale_idx_mult_;
+        round_mode_t rmode_;
+        bool do_bias_;
+        bool do_relu_;
+    };
+
+    void execute_forward() const;
+    const pd_t *pd() const { return (const pd_t *)primitive_t::pd(); }
+
+    pp_kernel_t *pp_kernel_;
 };
 }
 }

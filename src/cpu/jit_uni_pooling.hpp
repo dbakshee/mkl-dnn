@@ -55,6 +55,7 @@ struct jit_uni_pooling_fwd_t: public cpu_primitive_t {
                 && one_of(desc()->alg_kind, pooling_max,
                         pooling_avg_include_padding,
                         pooling_avg_exclude_padding)
+                && !has_zero_dim_memory()
                 && everyone_is(data_type::f32, src_pd()->desc()->data_type,
                         dst_pd()->desc()->data_type)
                 && everyone_is(desired_fmt(), src_pd()->desc()->format,
@@ -90,25 +91,25 @@ struct jit_uni_pooling_fwd_t: public cpu_primitive_t {
         }
     };
 
-    jit_uni_pooling_fwd_t(const pd_t *pd, const input_vector &inputs,
+    jit_uni_pooling_fwd_t(const pd_t *apd, const input_vector &inputs,
             const output_vector &outputs)
-        : cpu_primitive_t(&conf_, inputs, outputs), conf_(*pd)
-    { kernel_ = new jit_uni_pool_kernel_f32<isa>(conf_.jpp_); }
+        : cpu_primitive_t(apd, inputs, outputs)
+    { kernel_ = new jit_uni_pool_kernel_f32<isa>(pd()->jpp_); }
 
     ~jit_uni_pooling_fwd_t() { delete kernel_; }
 
     typedef typename prec_traits<data_type::f32>::type data_t;
 
-    virtual void execute(event_t *e) {
-        if (conf_.jpp_.ndims == 5) execute_forward_3d();
+    virtual void execute(event_t *e) const {
+        if (pd()->jpp_.ndims == 5) execute_forward_3d();
         else execute_forward();
         e->set_state(event_t::ready);
     }
 
 private:
-    void execute_forward();
-    void execute_forward_3d();
-    pd_t conf_;
+    void execute_forward() const;
+    void execute_forward_3d() const;
+    const pd_t *pd() const { return (const pd_t *)primitive_t::pd(); }
     jit_uni_pool_kernel_f32<isa> *kernel_;
 };
 
@@ -137,11 +138,12 @@ struct jit_uni_pooling_bwd_t: public cpu_primitive_t {
                 && one_of(desc()->alg_kind, pooling_max,
                         pooling_avg_include_padding,
                         pooling_avg_exclude_padding)
+                && !has_zero_dim_memory()
                 && everyone_is(desired_fmt(), diff_src_pd()->desc()->format,
                         diff_dst_pd()->desc()->format)
                 && everyone_is(data_type::f32, diff_src_pd()->desc()->data_type,
                         diff_dst_pd()->desc()->data_type)
-                && utils::implication(desc()->alg_kind == pooling_max,
+                && IMPLICATION(desc()->alg_kind == pooling_max,
                         hint_fwd_pd_ && hint_fwd_pd_->workspace_pd()
                         && hint_fwd_pd_->workspace_pd()->desc()->format
                                 == desired_fmt())
@@ -173,25 +175,25 @@ struct jit_uni_pooling_bwd_t: public cpu_primitive_t {
         }
     };
 
-    jit_uni_pooling_bwd_t(const pd_t *pd, const input_vector &inputs,
+    jit_uni_pooling_bwd_t(const pd_t *apd, const input_vector &inputs,
             const output_vector &outputs)
-        : cpu_primitive_t(&conf_, inputs, outputs), conf_(*pd)
-    { kernel_ = new jit_uni_pool_kernel_f32<isa>(conf_.jpp_); }
+        : cpu_primitive_t(apd, inputs, outputs)
+    { kernel_ = new jit_uni_pool_kernel_f32<isa>(pd()->jpp_); }
 
     ~jit_uni_pooling_bwd_t() { delete kernel_; }
 
     typedef typename prec_traits<data_type::f32>::type data_t;
 
-    virtual void execute(event_t *e) {
-        if (conf_.jpp_.ndims == 5) execute_backward_3d();
+    virtual void execute(event_t *e) const {
+        if (pd()->jpp_.ndims == 5) execute_backward_3d();
         else execute_backward();
         e->set_state(event_t::ready);
     }
 
 private:
-    void execute_backward();
-    void execute_backward_3d();
-    pd_t conf_;
+    void execute_backward() const;
+    void execute_backward_3d() const;
+    const pd_t *pd() const { return (const pd_t *)primitive_t::pd(); }
     jit_uni_pool_kernel_f32<isa> *kernel_;
 };
 

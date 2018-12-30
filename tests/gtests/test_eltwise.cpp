@@ -107,8 +107,8 @@ T soft_relu_bwd(T dd, T s) {
 
 template <typename T>
 T logistic_fwd(T s) {
-    T v = (T)(::tanhf((float)s / 2));
-    return (1 + v) / 2;
+    T v = (T)(::expf(- (float)s));
+    return 1 / (1 + v);
 }
 
 template <typename T>
@@ -125,6 +125,8 @@ struct eltwise_test_params {
     memory::format diff_format;
     data_t alpha, beta;
     memory::dims dims;
+    bool expect_to_fail;
+    mkldnn_status_t expected_status;
 };
 
 size_t n_elems(const memory::desc &md) {
@@ -246,6 +248,12 @@ private:
 
 protected:
     virtual void SetUp() {
+        p = ::testing::TestWithParam<decltype(p)>::GetParam();
+        catch_expected_failures([=](){Test();}, p.expect_to_fail,
+                    p.expected_status);
+    }
+
+    void Test() {
         p = ::testing::TestWithParam<eltwise_test_params<data_t>>::GetParam();
 
         ASSERT_TRUE(p.engine_kind == engine::kind::cpu);
@@ -356,6 +364,26 @@ TEST_P(eltwise_test_float, TestsEltwise)
 #define INST_TEST_CASE(str, ...) INSTANTIATE_TEST_CASE_P( \
         str, eltwise_test_float, ::testing::Values(__VA_ARGS__))
 
+INST_TEST_CASE(SimpleZeroDim,
+    PARAMS_ALL_ALG(ncdhw, nCdhw8c, 0.1f, 0.f, 0, 2, 4, 4, 4),
+    PARAMS_ALL_ALG(ncdhw, nCdhw8c, 0.1f, 0.f, 2, 0, 4, 4, 4),
+    PARAMS_ALL_ALG_SDPART(nCdhw16c, nCdhw16c, 0.1f, 0.2f, 0, 4, 2, 2, 2),
+    PARAMS_ALL_ALG_SDPART(nCdhw16c, nCdhw16c, 0.1f, 0.2f, 4, 0, 2, 2, 2)
+);
+
+#define CASE_EF(alg, d0, d1, d2, d3) \
+        eltwise_test_params_float { ENGINE, algorithm::eltwise_##alg, \
+        EXPAND_FORMATS(nchw), EXPAND_FORMATS(nchw), 0.f, 0.f, {d0, d1, d2, d3}, \
+        true, mkldnn_invalid_arguments }
+INST_TEST_CASE(SimpleExpectedFails,
+    CASE_EF(relu, -1, 2, 4, 4),
+    CASE_EF(sqrt, -1, 2, 4, 4),
+    CASE_EF(logistic, -1, 2, 4, 4),
+    CASE_EF(relu, 1, -2, 4, 4),
+    CASE_EF(sqrt, 1, -2, 4, 4),
+    CASE_EF(logistic, 1, -2, 4, 4)
+);
+
 INST_TEST_CASE(Simple_3D,
     PARAMS_ALL_ALG(ncdhw, nCdhw8c, 0.1f, 0.f, 2, 8, 4, 4, 4),
     PARAMS_ALL_ALG(nCdhw8c, ncdhw, 0.1f, 0.f, 2, 16, 4, 4, 4),
@@ -376,7 +404,11 @@ INST_TEST_CASE(Simple_blocked_padded,
     PARAMS_ALL_ALG(nChw16c, nChw16c, 0.1f, 0.2f, 4, 15, 2, 2),
     PARAMS_ALL_ALG_SDPART(nChw16c, nChw16c, 0.1f, 0.2f, 4, 27, 2, 2),
     PARAMS_ALL_ALG(nChw16c, nChw16c, 0.1f, 0.2f, 4, 23, 2, 2),
-    PARAMS_ALL_ALG_SDPART(nChw16c, nChw16c, 0.1f, 0.2f, 4, 17, 7, 7)
+    PARAMS_ALL_ALG_SDPART(nChw16c, nChw16c, 0.1f, 0.2f, 4, 17, 7, 7),
+    PARAMS_ALL_ALG(nChw8c, nChw8c, 0.1f, 0.2f, 4, 15, 2, 2),
+    PARAMS_ALL_ALG_SDPART(nChw8c, nChw8c, 0.1f, 0.2f, 4, 27, 2, 2),
+    PARAMS_ALL_ALG(nChw8c, nChw8c, 0.1f, 0.2f, 4, 23, 2, 2),
+    PARAMS_ALL_ALG_SDPART(nChw8c, nChw8c, 0.1f, 0.2f, 4, 17, 7, 7)
 );
 
 INST_TEST_CASE(Simple_NCDHW,

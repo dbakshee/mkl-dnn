@@ -110,11 +110,11 @@ inline unsigned int get_cache_size(int level, bool per_core = true){
     unsigned int l = level - 1;
     // Currently, if XByak is not able to fetch the cache topology
     // we default to 32KB of L1, 512KB of L2 and 1MB of L3 per core.
-    if (cpu.data_cache_levels == 0){
+    if (cpu.getDataCacheLevels() == 0){
         const int L1_cache_per_core = 32000;
         const int L2_cache_per_core = 512000;
         const int L3_cache_per_core = 1024000;
-        int num_cores = per_core ? 1 : omp_get_max_threads();
+        int num_cores = per_core ? 1 : mkldnn_get_max_threads();
         switch(l){
         case(0): return L1_cache_per_core * num_cores;
         case(1): return L2_cache_per_core * num_cores;
@@ -122,56 +122,14 @@ inline unsigned int get_cache_size(int level, bool per_core = true){
         default: return 0;
         }
     }
-    if (l < cpu.data_cache_levels) {
-        return cpu.data_cache_size[l]
-            / (per_core ? cpu.cores_sharing_data_cache[l] : 1);
+    if (l < cpu.getDataCacheLevels()) {
+        return cpu.getDataCacheSize(l)
+            / (per_core ? cpu.getCoresSharingDataCache(l) : 1);
     } else
         return 0;
 }
 
 }
-
-// TODO (Roma): move all_same to a more appropriate location
-
-template <typename T, typename U, typename... Us>
-struct all_same : std::false_type {};
-
-template <typename T, typename... Us>
-struct all_same<T, T, Us...> : all_same<T, Us...> { };
-
-template <typename T>
-struct all_same<T, T> : std::true_type {};
-
-template <size_t len = 64>
-class jit_tagged_label_base {
-public:
-    enum { maxlen = len };
-    template <size_t n, typename... Tags,
-             typename = std::enable_if<all_same<char, Tags...>::value>>
-    jit_tagged_label_base(const char (&base)[n], Tags... tags) {
-        // XXX: This code is ugly but useful
-        constexpr size_t ntags = sizeof...(tags);
-        static_assert(n + ntags < maxlen, "resulting label may be too long");
-        // paste tags first in case base has unexpected null chars
-        paste_tags(tags...);
-        for (size_t i = 0; i < n; i++)
-            label_name_[ntags + i] = base[i];
-        // don't assume that the base string is 0-terminated
-        label_name_[ntags + n] = '\0';
-    }
-    operator const char*() const { return label_name_; }
-    const char *c_str() const { return label_name_; }
-private:
-    char label_name_[maxlen];
-    void paste_tags() { }
-    template <typename... Tags>
-    void paste_tags(char tag, Tags... tags) {
-        label_name_[sizeof...(tags)] = tag;
-        paste_tags(tags...);
-    }
-};
-
-typedef jit_tagged_label_base<> jit_tagged_label;
 
 class jit_generator : public Xbyak::CodeGenerator
 {
@@ -200,6 +158,8 @@ public:
         _cmp_neq_uq = 4u,
         _cmp_nlt_us = 5u,
         _cmp_nle_us = 6u,
+
+        _op_floor = 1u,
     };
 
     Xbyak::Reg64 param1 = abi_param1;
@@ -326,17 +286,9 @@ public:
         }
     }
 
-    // Provide overrides for custom jit_tagged_label and C strings rather than
-    // implement a conversion of jit_tagge_label to std::string to avoid
-    // additional C++ runtime dependency
-
-    template <size_t len>
-    void L(const jit_tagged_label_base<len> &label) {
-        Xbyak::CodeGenerator::L(label.c_str());
-    }
-
-    void L(const char *label) { Xbyak::CodeGenerator::L(label); }
-    void L(const Xbyak::Label& label) { Xbyak::CodeGenerator::L(label); }
+    // Disallow char-based labels completely
+    void L(const char *label) = delete;
+    void L(Xbyak::Label& label) { Xbyak::CodeGenerator::L(label); }
 
     void uni_vpxor(const Xbyak::Xmm &x1, const Xbyak::Xmm &x2,
                    const Xbyak::Operand &op) {
@@ -345,7 +297,11 @@ public:
     }
     void uni_vpxor(const Xbyak::Ymm &x1, const Xbyak::Ymm &x2,
                    const Xbyak::Operand &op) {
-        vpxor(x1, x2, op);
+        if (mayiuse(avx2)) {
+            vpxor(x1, x2, op);
+        } else {
+            vxorps(x1, x2, op);
+        }
     }
     void uni_vpxor(const Xbyak::Zmm &x1, const Xbyak::Zmm &x2,
                    const Xbyak::Operand &op) {
@@ -398,7 +354,14 @@ public:
         shufps(x, x, 0x0);
     }
     void uni_vbroadcastss(const Xbyak::Ymm &x, const Xbyak::Operand &op) {
-        vbroadcastss(x, op);
+        if (op.isMEM() || mayiuse(avx2)) {
+            vbroadcastss(x, op);
+        } else {
+            Xbyak::Xmm t(x.getIdx());
+            if (t.getIdx() != op.getIdx()) movss(t, op);
+            vinsertf128(x, x, t, 1);
+            vshufps(x, x, x, 0);
+        }
     }
 
     void uni_vpbroadcastd(const Xbyak::Xmm &x, const Xbyak::Operand &op) {
@@ -406,7 +369,14 @@ public:
         pshufd(x, x, 0x0);
     }
     void uni_vpbroadcastd(const Xbyak::Ymm &x, const Xbyak::Operand &op) {
-        vpbroadcastd(x, op);
+        if (mayiuse(avx2)) {
+            vpbroadcastd(x, op);
+        } else {
+            Xbyak::Xmm t(x.getIdx());
+            if (t.getIdx() != op.getIdx()) movsd(t, op);
+            vinsertf128(x, x, t, 1);
+            vshufps(x, x, x, 0);
+        }
     }
 
     void uni_vdivps(const Xbyak::Xmm &x, const Xbyak::Operand &op1,
@@ -535,24 +505,30 @@ public:
         vpaddd(x1, x2, op);
     }
 
-    void uni_vandps(const Xbyak::Xmm &x, const Xbyak::Operand &op1,
-                    const Xbyak::Operand &op2 = Xbyak::Operand()) {
-        assert(x.getIdx() == op1.getIdx());
-        andps(x, op2);
+    void uni_vandps(const Xbyak::Xmm &x1, const Xbyak::Xmm &x2,
+                    const Xbyak::Operand &op = Xbyak::Operand()) {
+        assert(x1.getIdx() == x2.getIdx());
+        andps(x1, op);
     }
-    void uni_vandps(const Xbyak::Ymm &x, const Xbyak::Operand &op1,
-                    const Xbyak::Operand &op2 = Xbyak::Operand()) {
-        vandps(x, op1, op2);
+    void uni_vandps(const Xbyak::Ymm &x1, const Xbyak::Ymm &x2,
+                    const Xbyak::Operand &op = Xbyak::Operand()) {
+        if (!mayiuse(avx512_common) || x1.getBit() < 512)
+            vandps(x1, x2, op);
+        else
+            vpandd(x1, x2, op);
     }
 
-    void uni_vorps(const Xbyak::Xmm &x, const Xbyak::Operand &op1,
-                    const Xbyak::Operand &op2 = Xbyak::Operand()) {
-        assert(x.getIdx() == op1.getIdx());
-        orps(x, op2);
+    void uni_vorps(const Xbyak::Xmm &x1, const Xbyak::Xmm &x2,
+                    const Xbyak::Operand &op = Xbyak::Operand()) {
+        assert(x1.getIdx() == x2.getIdx());
+        orps(x1, op);
     }
-    void uni_vorps(const Xbyak::Ymm &x, const Xbyak::Operand &op1,
-                    const Xbyak::Operand &op2 = Xbyak::Operand()) {
-        vorps(x, op1, op2);
+    void uni_vorps(const Xbyak::Ymm &x1, const Xbyak::Ymm &x2,
+                    const Xbyak::Operand &op = Xbyak::Operand()) {
+        if (!mayiuse(avx512_common) || x1.getBit() < 512)
+            vorps(x1, x2, op);
+        else
+            vpord(x1, x2, op);
     }
 
     void uni_vpslld(const Xbyak::Xmm &x, const Xbyak::Operand &op,

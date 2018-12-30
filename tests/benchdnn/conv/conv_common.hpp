@@ -28,13 +28,10 @@
 
 namespace conv {
 
-enum alg_t { DIRECT, WINO };
+enum alg_t { DIRECT, WINO, AUTO };
 alg_t str2alg(const char *str);
 const char *alg2str(alg_t alg);
-
-enum merge_t { NONE, RELU, };
-merge_t str2merge(const char *str);
-const char *merge2str(merge_t merge);
+alg_t alg_kind2alg(mkldnn_alg_kind_t alg);
 
 struct desc_t {
     int g, mb;
@@ -85,6 +82,9 @@ extern const _dt_conf_t conf_s16s32s16s32;
 extern const _dt_conf_t conf_u8s8s32s32;
 extern const _dt_conf_t conf_u8s8s8s32;
 extern const _dt_conf_t conf_u8s8u8s32;
+extern const _dt_conf_t conf_s8s8s32s32;
+extern const _dt_conf_t conf_s8s8s8s32;
+extern const _dt_conf_t conf_s8s8u8s32;
 extern const _dt_conf_t conf_u8s8f32s32_wino;
 extern const _dt_conf_t conf_u8s8s32s32_wino;
 extern const _dt_conf_t conf_u8s8s8s32_wino;
@@ -92,11 +92,12 @@ extern const _dt_conf_t conf_u8s8u8s32_wino;
 
 const dt_conf_t *str2cfg(const char *str);
 const char *cfg2str(const dt_conf_t *cfg);
+const dt_conf_t *auto_cfg(const alg_t alg, const dt_conf_t *cfg);
 
 struct prb_t: public desc_t {
     prb_t(const desc_t &desc, dir_t dir, const dt_conf_t *cfg, alg_t alg,
-            merge_t merge, const attr_t &attr, int mb = 0)
-        : desc_t(desc), dir(dir), cfg(cfg), alg(alg), merge(merge), attr(attr)
+            const attr_t &attr, int mb = 0)
+        : desc_t(desc), dir(dir), cfg(cfg), alg(alg), attr(attr)
         , ops(0), scales(NULL) {
         if (mb) this->mb = mb;
         count_ops();
@@ -107,7 +108,6 @@ struct prb_t: public desc_t {
     dir_t dir;
     const dt_conf_t *cfg;
     alg_t alg;
-    merge_t merge;
     attr_t attr;
 
     double ops;
