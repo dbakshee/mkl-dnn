@@ -21,6 +21,8 @@
 
 #include "mkldnn.h"
 
+#include "src/common/mkldnn_thread.hpp"
+
 #include "mkldnn_common.hpp"
 #include "mkldnn_memory.hpp"
 
@@ -39,22 +41,17 @@ inline static void swap(int &a, int &b)
 }
 inline bool is_deconv_3d(const prb_t *p)
 {
-    return (p->id > 1) ? 1 : 0;
+    return (p->id > 1 || p->od > 1) ? 1 : 0;
 }
 
 inline int transpose_data_wei(const prb_t *p, dnn_mem_t &wei, dnn_mem_t &wei_tr) {
-#   pragma omp parallel for collapse(5)
-    for (int g = 0; g < p->g; ++g)
-    for (int oc = 0; oc < p->oc / p->g; ++oc)
-    for (int ic = 0; ic < p->ic / p->g; ++ic)
-    for (int kd = 0; kd < p->kd; ++kd)
-    for (int kh = 0; kh < p->kh; ++kh)
-    for (int kw = 0; kw < p->kw; ++kw)
-    {
+    mkldnn::impl::parallel_nd(
+        p->g, p->oc / p->g, p->ic / p->g, p->kd, p->kh, p->kw,
+        [&](int g, int oc, int ic, int kd, int kh, int kw) {
         size_t idx = (((((size_t)g * p->ic / p->g + ic) * p->oc / p->g + oc)
         * p->kd + kd) * p->kh + kh) * p->kw + kw;
         ((float*)wei_tr)[idx] = ((float*)wei)[wei_off_f(p, g, oc, ic, kd, kh, kw)];
-    }
+    });
 
     return OK;
 }
@@ -185,7 +182,7 @@ int doit(const prb_t *p, res_t *r) {
     *r = res_zero;
     bool with_groups = 1;
 
-    prb_t p_tr((desc_t)*p, p->dir, p->cfg, p->alg, p->merge, p->attr, p->mb);
+    prb_t p_tr((desc_t)*p, p->dir, p->cfg, p->alg, p->attr, p->mb);
     swap(p_tr.ic,  p_tr.oc);
     swap(p_tr.ih,  p_tr.oh);
     swap(p_tr.id,  p_tr.od);
@@ -246,7 +243,6 @@ int doit(const prb_t *p, res_t *r) {
         if (bench_mode & CORR) {
             compute_ref_bwd_d(&p_tr, dst_fp, wei_tr_fp, bia_fp, src_fp);
             dnn_mem_t dst(dst_dt, fp, src_format);
-            SAFE(dst.reorder(dst_dt), WARN);
             SAFE(compare_dst(p, dst, dst_fp, r, true), WARN);
         }
     } else if (p->dir == BWD_D) {
@@ -257,7 +253,6 @@ int doit(const prb_t *p, res_t *r) {
         if (bench_mode & CORR) {
             compute_ref_fwd(&p_tr, dst_fp, wei_tr_fp, zero_fp, src_fp);
             dnn_mem_t src(src_dt, fp, src_format);
-            SAFE(src.reorder(src_dt), WARN);
             SAFE(compare_src(p, src, src_fp, r, true), WARN);
         }
     } else if (p->dir & FLAG_BWD && p->dir & FLAG_WEI) {
@@ -271,12 +266,10 @@ int doit(const prb_t *p, res_t *r) {
             compute_ref_bwd_weights(&p_tr, dst_fp, wei_tr_fp, src_fp);
             transpose_data_wei(&p_tr, wei_tr_fp, wei_fp);
             dnn_mem_t wei(wei_dt, fp, wei_format);
-            SAFE(wei.reorder(wei_dt), WARN);
             SAFE(compare_wei(&p_tr, wei, wei_fp, r, true), WARN);
             if (p->dir & FLAG_BIA) {
                 compute_ref_bwd_bias(p, bia_fp, dst_fp);
                 dnn_mem_t bia(bia_dt, fp, mkldnn_x);
-                SAFE(bia.reorder(bia_dt), WARN);
                 SAFE(compare_bia(p, bia, bia_fp, r, true), WARN);
             }
         }
@@ -301,6 +294,9 @@ int doit(const prb_t *p, res_t *r) {
             if (stop) break;
         }
     }
+
+    DNN_SAFE_V(mkldnn_primitive_destroy(c));
+    DNN_SAFE_V(mkldnn_primitive_desc_destroy(dpd));
 
     delete p_bia_dt;
     delete p_bia_fp;

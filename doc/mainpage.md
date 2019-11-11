@@ -18,12 +18,13 @@ The table below summarizes the list of supported functions and their variants.
 
 | Primitive class   | Primitive                | fp32 training | fp32 inference | int8 inference |
 | :---------------- | :----------------------- | :-----------: | :------------: | :------------: |
-| Convolution       | 2D direct convolution    | x             | x              | x              |
+| Convolution       | 1D direct convolution    | x             | x              |                |
+|                   | 2D direct convolution    | x             | x              | x              |
 |                   | 2D direct deconvolution  | x             | x              | x              |
 |                   | 2D winograd convolution  | x             | x              | x              |
 |                   | 3D direct convolution    | x             | x              |                |
 |                   | 3D direct deconvolution  | x             | x              |                |
-| Inner Product     | 2D inner product         | x             | x              |                |
+| Inner Product     | 2D inner product         | x             | x              | x              |
 |                   | 3D inner product         | x             | x              |                |
 | RNN (experimental)| Vanilla RNN cell         | x             | x              |                |
 |                   | LSTM cell                | x             | x              |                |
@@ -47,6 +48,7 @@ The table below summarizes the list of supported functions and their variants.
 |                   | Sum                      | x             | x              | x              |
 |                   | Concat                   | x             | x              | x              |
 |                   | Elementwise operations   |               | x              |                |
+|                   | Channel Shuffle          | x             | x              | x              |
 
 ## Programming Model
 
@@ -150,6 +152,7 @@ The following examples are available in the /examples directory and provide more
    format `any` for input or output.
    The memory format chosen is based on different circumstances such as hardware and
    convolutional parameters.
+*  Convolution could be executed using the [Winograd algorithm](@ref winograd_convolution) for a significant performance boost.
 *  Operation primitives (such as ReLU, LRN, or pooling) following convolution or
    inner product, should have input in the same memory format as the
    convolution or inner-product. Reordering can be an expensive
@@ -159,6 +162,7 @@ The following examples are available in the /examples directory and provide more
 *  An operation primitive (typically operations such as pooling, LRN, or softmax)
    might need workspace memory for storing results of intermediate operations
    that help with backward propagation.
+
 
 The following link provides a guide to MKLDNN verbose mode for profiling execution:
 

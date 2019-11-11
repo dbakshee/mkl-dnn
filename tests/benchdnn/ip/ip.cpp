@@ -21,6 +21,8 @@
 
 #include "mkldnn.h"
 
+#include "src/common/mkldnn_thread.hpp"
+
 #include "mkldnn_common.hpp"
 #include "mkldnn_memory.hpp"
 
@@ -185,22 +187,17 @@ int fill_src(const prb_t *p, dnn_mem_t &mem_dt, dnn_mem_t &mem_fp, res_t *r) {
     const auto &c = p->cfg[SRC];
     const int range = c.f_max - c.f_min + 1;
 
-#pragma omp parallel for collapse(5)
-    for (int mb = 0; mb < p->mb; ++mb)
-        for (int ic = 0; ic < p->ic; ++ic)
-            for (int id = 0; id < p->id; ++id)
-                for (int ih = 0; ih < p->ih; ++ih)
-                    for (int iw = 0; iw < p->iw; ++iw) {
-                        const int gen = 5 * id + 17 * ih + 13 * iw + 13 * mb
-                                + 19 * ic + 1637;
-                        const bool non_base = flip_coin(gen, c.f_sparsity);
-                        const float value = non_base ?
-                                c.f_min + gen * c.f_step % range :
-                                c.f_base;
+    mkldnn::impl::parallel_nd(p->mb, p->ic, p->id, p->ih, p->iw,
+        [&](int mb, int ic, int id, int ih, int iw) {
+            const int gen
+                = 5 * id + 17 * ih + 13 * iw + 13 * mb + 19 * ic + 1637;
+            const bool non_base = flip_coin(gen, c.f_sparsity);
+            const float value = non_base
+                ?  c.f_min + gen * c.f_step % range : c.f_base;
 
-                        ((float *)mem_00)[src_off_f(p, mb, ic, id, ih, iw)]
-                                = value;
-                    }
+            ((float *)mem_00)[src_off_f(p, mb, ic, id, ih, iw)] = value;
+        }
+    );
 
     SAFE(mem_dt.reorder(mem_00), WARN);
     SAFE(mem_fp.reorder(mem_dt), WARN);
@@ -213,22 +210,17 @@ int fill_wei(const prb_t *p, dnn_mem_t &mem_dt, dnn_mem_t &mem_fp, res_t *r) {
 
     const auto &c = p->cfg[WEI];
     const int range = c.f_max - c.f_min + 1;
-#pragma omp parallel for collapse(5)
-    for (int oc = 0; oc < p->oc; ++oc)
-        for (int ic = 0; ic < p->ic; ++ic)
-            for (int id = 0; id < p->id; ++id)
-                for (int ih = 0; ih < p->ih; ++ih)
-                    for (int iw = 0; iw < p->iw; ++iw) {
-                        const int gen = 5 * id + 17 * ih + 13 * iw + 13 * oc
-                                + 19 * ic + 38;
-                        const bool non_base = flip_coin(gen, c.f_sparsity);
-                        const float value = non_base ?
-                                c.f_min + gen * c.f_step % range :
-                                c.f_base;
 
-                        ((float *)mem_00)[wei_off_f(p, oc, ic, id, ih, iw)]
-                                = value;
-                    }
+    mkldnn::impl::parallel_nd(p->oc, p->ic, p->id, p->ih, p->iw,
+        [&](int oc, int ic, int id, int ih, int iw) {
+            const int gen = 5 * id + 17 * ih + 13 * iw + 13 * oc + 19 * ic + 38;
+            const bool non_base = flip_coin(gen, c.f_sparsity);
+            const float value = non_base
+                    ?  c.f_min + gen * c.f_step % range : c.f_base;
+
+            ((float *)mem_00)[wei_off_f(p, oc, ic, id, ih, iw)] = value;
+        }
+    );
 
     SAFE(mem_dt.reorder(mem_00), WARN);
     SAFE(mem_fp.reorder(mem_dt), WARN);
@@ -245,8 +237,8 @@ int fill_bia(const prb_t *p, dnn_mem_t &mem_dt, dnn_mem_t &mem_fp, res_t *r) {
     for (size_t i = 0; i < sz; ++i) {
         const int gen = (int)(19 * i);
         const bool non_base = flip_coin(gen, c.f_sparsity);
-        const float value
-                = non_base ? c.f_min + gen * c.f_step % range : c.f_base;
+        const float value = non_base
+                ? c.f_min + gen * c.f_step % range : c.f_base;
 
         ((float *)mem_00)[i] = value;
     }
@@ -262,19 +254,14 @@ int fill_dst(const prb_t *p, dnn_mem_t &mem_dt, dnn_mem_t &mem_fp, res_t *r) {
     const auto &c = p->cfg[DST];
     const int range = c.f_max - c.f_min + 1;
 
-#pragma omp parallel for collapse(2)
-    for (int mb = 0; mb < p->mb; ++mb)
-        for (int oc = 0; oc < p->oc; ++oc) {
-            const int gen = 17 * mb + 13 * oc + 12;
-            const bool non_base = flip_coin(gen, c.f_sparsity);
-            const float value
-                    = non_base ? c.f_min + gen * c.f_step % range : c.f_base;
+    mkldnn::impl::parallel_nd(p->mb, p->oc, [&](int mb, int oc) {
+        const int gen = 17 * mb + 13 * oc + 12;
+        const bool non_base = flip_coin(gen, c.f_sparsity);
+        const float value = non_base
+                ? c.f_min + gen * c.f_step % range : c.f_base;
 
-            ((float *)mem_00)[dst_off_f(p, mb, oc)] = value;
-        }
-
-    mem_dt.reorder(mem_00);
-    mem_fp.reorder(mem_dt);
+        ((float *)mem_00)[dst_off_f(p, mb, oc)] = value;
+    });
 
     SAFE(mem_dt.reorder(mem_00), WARN);
     SAFE(mem_fp.reorder(mem_dt), WARN);
@@ -327,7 +314,6 @@ int doit(const prb_t *p, res_t *r) {
         if (bench_mode & CORR) {
             compute_ref_fwd(p, src_fp, wei_fp, bia_fp, dst_fp);
             dnn_mem_t dst(dst_dt, fp, mkldnn_nc);
-            SAFE(dst.reorder(dst_dt), WARN);
             SAFE(compare_dat(p, DST, dst, dst_fp, r), WARN);
         }
     } else if (p->dir == BWD_D) {
@@ -338,7 +324,6 @@ int doit(const prb_t *p, res_t *r) {
         if (bench_mode & CORR) {
             compute_ref_bwd_d(p, src_fp, wei_fp, dst_fp);
             dnn_mem_t src(src_dt, fp, src_format);
-            SAFE(src.reorder(src_dt), WARN);
             SAFE(compare_dat(p, SRC, src, src_fp, r), WARN);
         }
     } else if (p->dir & FLAG_BWD && p->dir & FLAG_WEI) {
@@ -351,11 +336,9 @@ int doit(const prb_t *p, res_t *r) {
         if (bench_mode & CORR) {
             compute_ref_bwd_w(p, src_fp, wei_fp, bia_fp, dst_fp);
             dnn_mem_t wei(wei_dt, fp, wei_format);
-            SAFE(wei.reorder(wei_dt), WARN);
             if (compare_dat(p, WEI, wei, wei_fp, r) != OK) return FAIL;
             if (p->dir & FLAG_BIA) {
                 dnn_mem_t bia(bia_dt, fp, mkldnn_x);
-                SAFE(bia.reorder(bia_dt), WARN);
                 SAFE(compare_dat(p, BIA, bia, bia_fp, r), WARN);
             }
         }
@@ -375,6 +358,9 @@ int doit(const prb_t *p, res_t *r) {
             if (stop) break;
         }
     }
+
+    DNN_SAFE(mkldnn_primitive_desc_destroy(ippd), CRIT);
+    DNN_SAFE(mkldnn_primitive_destroy(ip), CRIT);
 
     return OK;
 }
